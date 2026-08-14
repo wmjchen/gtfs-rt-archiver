@@ -1,0 +1,26 @@
+services:
+  archiver:
+    build:
+      context: .
+      args:
+        VERSION: dev
+        COMMIT: local
+    restart: unless-stopped
+    init: true
+    read_only: true
+    stop_grace_period: 90s
+    ports:
+      - "8080:8080"
+    environment:
+      TRANSLINK_API_KEY: ${TRANSLINK_API_KEY:-}
+    volumes:
+      - archive-data:/data
+      - ./config.yaml:/config/config.yaml:ro
+      - ./rclone.conf:/config/rclone.conf:ro
+      - ./translink-attribution.txt:/config/translink-attribution.txt:ro
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+
+volumes:
+  archive-data:
+

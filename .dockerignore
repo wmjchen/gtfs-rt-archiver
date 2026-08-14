@@ -1,0 +1,11 @@
+.git
+.agents
+.codex
+SPEC.md
+data
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+config.yaml
+rclone.conf
+.env

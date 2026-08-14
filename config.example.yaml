@@ -1,0 +1,211 @@
+version: 1
+
+storage:
+  root: /data
+  state_db: /data/state.sqlite
+  close_delay: 15m
+  raw_retention_after_upload: 7d
+  parquet_retention_after_upload: 7d
+  metadata_retention: 30d
+  allow_local_only_cleanup: false
+  pause_fetching_at_percent: 90
+  resume_fetching_at_percent: 80
+
+runtime:
+  http_address: :8080
+  shutdown_timeout: 60s
+  fetch_concurrency: 16
+  per_host_concurrency: 4
+  compaction_concurrency: 1
+  upload_concurrency: 2
+
+http:
+  user_agent: gtfs-rt-archiver/dev
+  request_timeout: 20s
+  max_response_bytes: 33554432
+  max_start_lateness: 5s
+  retry:
+    attempts: 2
+    initial_backoff: 1s
+    max_backoff: 5s
+
+parquet:
+  compression: zstd
+  target_row_group_bytes: 134217728
+
+rclone:
+  binary: rclone
+  config_file: /config/rclone.conf
+  process_timeout: 2h
+
+sources:
+  # TransLink (Vancouver) demonstrates the API-key auth pattern. The key is
+  # loaded from an environment variable, never written into the URL.
+  - id: translink
+    timezone: America/Vancouver
+    registry_id: f-translink~rt
+    license_url: https://www.translink.ca/about-us/doing-business-with-translink/app-developer-resources/terms-of-use
+    attribution_text_file: /config/translink-attribution.txt
+    streams:
+      - id: vehicle_positions
+        expected_kind: vehicle_position
+        url: https://gtfsapi.translink.ca/v3/gtfsposition
+        interval: 30s
+        auth:
+          query:
+            apikey:
+              env: TRANSLINK_API_KEY
+      - id: trip_updates
+        expected_kind: trip_update
+        url: https://gtfsapi.translink.ca/v3/gtfsrealtime
+        interval: 30s
+        auth:
+          query:
+            apikey:
+              env: TRANSLINK_API_KEY
+      - id: alerts
+        expected_kind: alert
+        url: https://gtfsapi.translink.ca/v3/gtfsalerts
+        interval: 30s
+        auth:
+          query:
+            apikey:
+              env: TRANSLINK_API_KEY
+
+  # Toronto Transit Commission (TTC)
+  - id: ttc
+    timezone: America/Toronto
+    license_url: https://open.toronto.ca/dataset/ttc-bustime-real-time-next-vehicle-arrival-nvas/
+    streams:
+      - id: vehicle_positions
+        expected_kind: vehicle_position
+        url: https://bustime.ttc.ca/gtfsrt/vehicles
+        interval: 30s
+      - id: trip_updates
+        expected_kind: trip_update
+        url: https://bustime.ttc.ca/gtfsrt/trips
+        interval: 30s
+      - id: alerts
+        expected_kind: alert
+        url: https://bustime.ttc.ca/gtfsrt/alerts
+        interval: 30s
+
+  # Hamilton Street Railway
+  - id: hamilton
+    timezone: America/Toronto
+    license_url: https://www.hamilton.ca/city-council/data-maps/open-data/open-data-licence-terms-and-conditions
+    streams:
+      - id: vehicle_positions
+        expected_kind: vehicle_position
+        url: https://opendata.hamilton.ca/GTFS-RT/GTFS_VehiclePositions.pb
+        interval: 30s
+      - id: trip_updates
+        expected_kind: trip_update
+        url: https://opendata.hamilton.ca/GTFS-RT/GTFS_TripUpdates.pb
+        interval: 30s
+      - id: alerts
+        expected_kind: alert
+        url: https://opendata.hamilton.ca/GTFS-RT/GTFS_ServiceAlerts.pb
+        interval: 30s
+
+  # BC Transit (Victoria Regional Transit System)
+  - id: bc_transit_victoria
+    timezone: America/Vancouver
+    license_url: https://www.bctransit.com/open-data/terms-of-use
+    streams:
+      - id: vehicle_positions
+        expected_kind: vehicle_position
+        url: https://bct.tmix.se/gtfs-realtime/vehicleupdates.pb?operatorIds=48
+        interval: 30s
+      - id: trip_updates
+        expected_kind: trip_update
+        url: https://bct.tmix.se/gtfs-realtime/tripupdates.pb?operatorIds=48
+        interval: 30s
+      - id: alerts
+        expected_kind: alert
+        url: https://bct.tmix.se/gtfs-realtime/alerts.pb?operatorIds=48
+        interval: 30s
+
+  # Durham Region Transit
+  - id: durham_region
+    timezone: America/Toronto
+    license_url: https://opendata.durham.ca/search?q=service%20alert
+    streams:
+      - id: vehicle_positions
+        expected_kind: vehicle_position
+        url: https://drtonline.durhamregiontransit.com/gtfsrealtime/VehiclePositions
+        interval: 30s
+      - id: trip_updates
+        expected_kind: trip_update
+        url: https://drtonline.durhamregiontransit.com/gtfsrealtime/TripUpdates
+        interval: 30s
+      - id: alerts
+        expected_kind: alert
+        url: https://maps.durham.ca/OpenDataGTFS/alerts.pb
+        interval: 30s
+
+  # Kingston Transit
+  - id: kingston
+    timezone: America/Toronto
+    streams:
+      - id: vehicle_positions
+        expected_kind: vehicle_position
+        url: https://api.cityofkingston.ca/gtfs-realtime/vehicleupdates.pb
+        interval: 30s
+      - id: trip_updates
+        expected_kind: trip_update
+        url: https://api.cityofkingston.ca/gtfs-realtime/tripupdates.pb
+        interval: 30s
+      - id: alerts
+        expected_kind: alert
+        url: https://api.cityofkingston.ca/gtfs-realtime/alerts.pb
+        interval: 30s
+
+  # Halifax Transit. These IIS-hosted endpoints reject the default
+  # `Accept: application/x-protobuf` header with HTTP 406, so they override it
+  # per-stream with `Accept: */*`.
+  - id: halifax
+    timezone: America/Halifax
+    license_url: https://www.halifax.ca/opendata
+    streams:
+      - id: vehicle_positions
+        expected_kind: vehicle_position
+        url: https://gtfs.halifax.ca/realtime/Vehicle/VehiclePositions.pb
+        interval: 30s
+        headers:
+          Accept: "*/*"
+      - id: trip_updates
+        expected_kind: trip_update
+        url: https://gtfs.halifax.ca/realtime/TripUpdate/TripUpdates.pb
+        interval: 30s
+        headers:
+          Accept: "*/*"
+      - id: alerts
+        expected_kind: alert
+        url: https://gtfs.halifax.ca/realtime/Alert/Alerts.pb
+        interval: 30s
+        headers:
+          Accept: "*/*"
+
+  # MiWay (Mississauga). Also IIS-hosted; needs the Accept override.
+  - id: miway
+    timezone: America/Toronto
+    license_url: https://www.mississauga.ca/portal/miway/developerdownload
+    streams:
+      - id: vehicle_positions
+        expected_kind: vehicle_position
+        url: https://www.miapp.ca/GTFS_RT/Vehicle/VehiclePositions.pb
+        interval: 30s
+        headers:
+          Accept: "*/*"
+      - id: trip_updates
+        expected_kind: trip_update
+        url: https://www.miapp.ca/GTFS_RT/TripUpdate/TripUpdates.pb
+        interval: 30s
+        headers:
+          Accept: "*/*"
+
+destinations:
+  - id: primary
+    remote: s3-primary:transit-archive/gtfs-rt
+    required: true

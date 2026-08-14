@@ -1,0 +1,12 @@
+/SPEC.md
+/docs/
+/bin/
+/data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+coverage.out
+/config.yaml
+/rclone.conf
+/.env
+/translink-attribution.txt

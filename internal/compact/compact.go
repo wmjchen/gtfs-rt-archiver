@@ -434,6 +434,23 @@ func validateParquet(path string, expected []model.Capture) error {
 	return nil
 }
 
+// expectedArtifactRows derives the row count the revision's single parquet
+// artifact must contain, by schema version. Nested revisions hold one row per
+// captured response; flattened trip-update revisions hold one row per
+// stop_time_update (plus zero-STU base rows, which are not counted here).
+func expectedArtifactRows(manifest model.Manifest) (int64, error) {
+	if manifest.SchemaVersion == model.ParquetSchemaVersionTripUpdatesFlattened {
+		if manifest.ExpectedKind != "trip_update" {
+			return 0, fmt.Errorf("schema version %d is only valid for trip_update streams, got %q", model.ParquetSchemaVersionTripUpdatesFlattened, manifest.ExpectedKind)
+		}
+		if manifest.StopTimeUpdateTotal == nil {
+			return 0, fmt.Errorf("flattened trip_update manifest lacks stop_time_update_total")
+		}
+		return *manifest.StopTimeUpdateTotal, nil
+	}
+	return manifest.CapturedResponses, nil
+}
+
 func VerifyDirectory(root string, compaction *model.Compaction) error {
 	manifestPath, err := safeRootPath(root, compaction.ManifestPath)
 	if err != nil {
@@ -490,6 +507,10 @@ func VerifyDirectory(root string, compaction *model.Compaction) error {
 			return errors.New("manifest destination snapshot is inconsistent")
 		}
 	}
+	expectedRows, err := expectedArtifactRows(manifest)
+	if err != nil {
+		return err
+	}
 	for _, artifact := range manifest.Files {
 		if filepath.Base(artifact.RelativePath) != artifact.RelativePath {
 			return errors.New("manifest artifact path is not a basename")
@@ -509,7 +530,7 @@ func VerifyDirectory(root string, compaction *model.Compaction) error {
 		if hash != artifact.SHA256 || size != artifact.Bytes {
 			return fmt.Errorf("artifact %s integrity mismatch", artifact.RelativePath)
 		}
-		if artifact.RelativePath != "data-"+artifact.SHA256+".parquet" || artifact.Rows != manifest.CapturedResponses || artifact.Entities != manifest.EntityTotal {
+		if artifact.RelativePath != "data-"+artifact.SHA256+".parquet" || artifact.Rows != expectedRows || artifact.Entities != manifest.EntityTotal {
 			return fmt.Errorf("artifact %s metadata mismatch", artifact.RelativePath)
 		}
 		if compaction.DataPath != filepath.ToSlash(filepath.Join(compaction.Directory, artifact.RelativePath)) || compaction.DataSHA256 != artifact.SHA256 || compaction.DataBytes != artifact.Bytes {

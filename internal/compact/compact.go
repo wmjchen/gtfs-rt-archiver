@@ -137,7 +137,7 @@ func (c *Compactor) Compact(ctx context.Context, req Request) (*model.Compaction
 		SourceID: source.ID, StreamID: stream.ID, RegistryID: source.RegistryID,
 		ExpectedKind: stream.ExpectedKind, ArchiveDate: req.Date, Timezone: loc.String(),
 		DayStartUTC: day.UTC(), DayEndUTC: dayEnd.UTC(), FormatVersion: model.ParquetFormatVersion,
-		SchemaVersion: model.ParquetSchemaVersion, Revision: req.Revision,
+		SchemaVersion: schemaVersionForKind(stream.ExpectedKind), Revision: req.Revision,
 		ApplicationVersion: version.Current().Version, ProtobufRevision: version.Current().ProtobufRevision,
 		ConfigFingerprint: c.cfg.Fingerprint(), CreatedAt: created, ScheduledTicks: stats.Scheduled,
 		SkippedTicks: stats.Skipped, CapturedResponses: int64(len(captures)), HTTPFailures: stats.HTTPFailures,
@@ -295,7 +295,7 @@ func (c *Compactor) writeParquet(ctx context.Context, path string, captures []mo
 	}
 	writer := parquet.NewGenericWriter[Row](f, options...)
 	writer.SetKeyValueMetadata("gtfsrt.format_version", fmt.Sprint(model.ParquetFormatVersion))
-	writer.SetKeyValueMetadata("gtfsrt.schema_version", fmt.Sprint(model.ParquetSchemaVersion))
+	writer.SetKeyValueMetadata("gtfsrt.schema_version", fmt.Sprint(manifest.SchemaVersion))
 	writer.SetKeyValueMetadata("gtfsrt.application_version", manifest.ApplicationVersion)
 	writer.SetKeyValueMetadata("gtfsrt.protobuf_revision", manifest.ProtobufRevision)
 	writer.SetKeyValueMetadata("gtfsrt.config_fingerprint", manifest.ConfigFingerprint)
@@ -447,8 +447,11 @@ func VerifyDirectory(root string, compaction *model.Compaction) error {
 	if err := json.Unmarshal(b, &manifest); err != nil {
 		return fmt.Errorf("decode manifest: %w", err)
 	}
-	if manifest.ManifestVersion != model.ManifestFormatVersion || manifest.FormatVersion != model.ParquetFormatVersion || manifest.SchemaVersion != model.ParquetSchemaVersion {
-		return errors.New("manifest uses an unsupported format or schema version")
+	if manifest.ManifestVersion != model.ManifestFormatVersion || manifest.FormatVersion != model.ParquetFormatVersion {
+		return errors.New("manifest uses an unsupported format version")
+	}
+	if !model.IsSupportedParquetSchemaVersion(manifest.SchemaVersion) {
+		return errors.New("manifest uses an unsupported schema version")
 	}
 	if manifest.SourceID != compaction.SourceID || manifest.StreamID != compaction.StreamID || manifest.ArchiveDate != compaction.ArchiveDate || manifest.Revision != compaction.Revision {
 		return errors.New("manifest identity does not match state")
@@ -527,6 +530,13 @@ func safeRootPath(root, relative string) (string, error) {
 		return "", errors.New("artifact path escapes storage root")
 	}
 	return artifactPath, nil
+}
+
+// schemaVersionForKind selects the parquet row-layout version a revision of
+// the given stream kind is written in. Trip-update flattening is wired in the
+// compaction task of this plan; every other kind stays nested.
+func schemaVersionForKind(expectedKind string) int {
+	return model.ParquetSchemaVersionNested
 }
 
 func requiredDestinationIDs(destinations []config.Destination) []string {

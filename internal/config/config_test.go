@@ -115,6 +115,32 @@ func TestDestinationDefaults(t *testing.T) {
 	}
 }
 
+func TestAllowHTTPGatesPlaintextStreams(t *testing.T) {
+	body := `
+version: 1
+storage: {root: /tmp/archive}
+sources:
+  - id: demo
+    timezone: UTC
+    streams:
+      - id: feed
+        expected_kind: mixed
+        url: http://example.test/feed
+        interval: 30s
+`
+	// Without allow_http the plain-text stream is rejected.
+	p := writeConfig(t, body)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "HTTPS URL") {
+		t.Fatalf("expected HTTPS-required error, got %v", err)
+	}
+	// With allow_http: true the same URL validates.
+	p = writeConfig(t, strings.ReplaceAll(body, "storage: {root: /tmp/archive}",
+		"storage: {root: /tmp/archive}\nhttp:\n  allow_http: true"))
+	if _, err := Load(p); err != nil {
+		t.Fatalf("allow_http: true should accept http URL, got %v", err)
+	}
+}
+
 func TestRejectsInlineSecretsAndDuplicateYAMLKeys(t *testing.T) {
 	inline := writeConfig(t, `
 version: 1

@@ -7,6 +7,7 @@
 *.sqlite-wal
 coverage.out
 /config.yaml
+/canada-config.yaml
 /rclone.conf
 /.env
 /translink-attribution.txt

@@ -93,6 +93,7 @@ type HTTP struct {
 	RequestTimeout   Duration `yaml:"request_timeout" json:"request_timeout"`
 	MaxResponseBytes int64    `yaml:"max_response_bytes" json:"max_response_bytes"`
 	MaxStartLateness Duration `yaml:"max_start_lateness" json:"max_start_lateness"`
+	AllowHTTP        bool     `yaml:"allow_http" json:"allow_http,omitempty"`
 	Retry            Retry    `yaml:"retry" json:"retry"`
 }
 
@@ -318,8 +319,13 @@ func (c *Config) Validate() error {
 				add("stream %q has invalid expected_kind %q", key, stream.ExpectedKind)
 			}
 			u, err := url.Parse(stream.URL)
-			if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
-				add("stream %q must have an HTTPS URL without userinfo or fragment", key)
+			schemeOK := u.Scheme == "https" || (c.HTTP.AllowHTTP && u.Scheme == "http")
+			if err != nil || !schemeOK || u.Host == "" || u.User != nil || u.Fragment != "" {
+				if c.HTTP.AllowHTTP {
+					add("stream %q must have an HTTPS or HTTP URL without userinfo or fragment", key)
+				} else {
+					add("stream %q must have an HTTPS URL without userinfo or fragment", key)
+				}
 			}
 			if u != nil {
 				for name := range u.Query() {

@@ -11,8 +11,32 @@ const (
 	SidecarFormatVersion  = 1
 	ManifestFormatVersion = 1
 	ParquetFormatVersion  = 1
-	ParquetSchemaVersion  = 1
+
+	// ParquetSchemaVersionNested is the per-capture nested row layout used
+	// for every stream kind since format v1.
+	ParquetSchemaVersionNested = 1
+
+	// ParquetSchemaVersionTripUpdatesFlattened is the one-row-per-stop_time_update
+	// trip-update layout defined by docs/spec-flatten-trip-updates.md (gtfsrt.io
+	// TRIP_UPDATES_SCHEMA parity plus archiver provenance columns). Only
+	// trip_update streams emit it.
+	ParquetSchemaVersionTripUpdatesFlattened = 2
 )
+
+// SupportedParquetSchemaVersions lists every row-layout version verification
+// must accept, including legacy nested trip-update revisions.
+var SupportedParquetSchemaVersions = []int{ParquetSchemaVersionNested, ParquetSchemaVersionTripUpdatesFlattened}
+
+// IsSupportedParquetSchemaVersion reports whether v is a readable row-layout
+// version.
+func IsSupportedParquetSchemaVersion(v int) bool {
+	for _, version := range SupportedParquetSchemaVersions {
+		if v == version {
+			return true
+		}
+	}
+	return false
+}
 
 type Tick struct {
 	ID                string     `json:"tick_id"`
@@ -77,33 +101,36 @@ type Artifact struct {
 }
 
 type Manifest struct {
-	ManifestVersion       int                   `json:"manifest_version"`
-	DatasetStatus         string                `json:"dataset_status"`
-	SourceID              string                `json:"source_id"`
-	StreamID              string                `json:"stream_id"`
-	RegistryID            string                `json:"registry_id,omitempty"`
-	ExpectedKind          string                `json:"expected_kind"`
-	ArchiveDate           string                `json:"archive_date"`
-	Timezone              string                `json:"timezone"`
-	DayStartUTC           time.Time             `json:"day_start_utc"`
-	DayEndUTC             time.Time             `json:"day_end_utc"`
-	FormatVersion         int                   `json:"format_version"`
-	SchemaVersion         int                   `json:"schema_version"`
-	Revision              int                   `json:"revision"`
-	PredecessorRevision   *int                  `json:"predecessor_revision,omitempty"`
-	ApplicationVersion    string                `json:"application_version"`
-	ProtobufRevision      string                `json:"protobuf_revision"`
-	ConfigFingerprint     string                `json:"config_fingerprint"`
-	CreatedAt             time.Time             `json:"created_at"`
-	ScheduledTicks        int64                 `json:"scheduled_ticks"`
-	SkippedTicks          int64                 `json:"skipped_ticks"`
-	CapturedResponses     int64                 `json:"captured_responses"`
-	ValidSnapshots        int64                 `json:"valid_snapshots"`
-	InvalidPayloads       int64                 `json:"invalid_payloads"`
-	HTTPFailures          int64                 `json:"http_failures"`
-	NetworkFailures       int64                 `json:"network_failures"`
-	FailureCategoryCounts map[string]int64      `json:"failure_category_counts"`
-	EntityTotal           int64                 `json:"entity_total"`
+	ManifestVersion       int              `json:"manifest_version"`
+	DatasetStatus         string           `json:"dataset_status"`
+	SourceID              string           `json:"source_id"`
+	StreamID              string           `json:"stream_id"`
+	RegistryID            string           `json:"registry_id,omitempty"`
+	ExpectedKind          string           `json:"expected_kind"`
+	ArchiveDate           string           `json:"archive_date"`
+	Timezone              string           `json:"timezone"`
+	DayStartUTC           time.Time        `json:"day_start_utc"`
+	DayEndUTC             time.Time        `json:"day_end_utc"`
+	FormatVersion         int              `json:"format_version"`
+	SchemaVersion         int              `json:"schema_version"`
+	Revision              int              `json:"revision"`
+	PredecessorRevision   *int             `json:"predecessor_revision,omitempty"`
+	ApplicationVersion    string           `json:"application_version"`
+	ProtobufRevision      string           `json:"protobuf_revision"`
+	ConfigFingerprint     string           `json:"config_fingerprint"`
+	CreatedAt             time.Time        `json:"created_at"`
+	ScheduledTicks        int64            `json:"scheduled_ticks"`
+	SkippedTicks          int64            `json:"skipped_ticks"`
+	CapturedResponses     int64            `json:"captured_responses"`
+	ValidSnapshots        int64            `json:"valid_snapshots"`
+	InvalidPayloads       int64            `json:"invalid_payloads"`
+	HTTPFailures          int64            `json:"http_failures"`
+	NetworkFailures       int64            `json:"network_failures"`
+	FailureCategoryCounts map[string]int64 `json:"failure_category_counts"`
+	EntityTotal           int64            `json:"entity_total"`
+	// StopTimeUpdateTotal is the flattened stop-time-update row total. Set only
+	// on trip-update revisions (schema version 2); nil for all other kinds.
+	StopTimeUpdateTotal   *int64                `json:"stop_time_update_total,omitempty"`
 	EarliestCapture       *time.Time            `json:"earliest_capture,omitempty"`
 	LatestCapture         *time.Time            `json:"latest_capture,omitempty"`
 	EarliestFeedTimestamp *uint64               `json:"earliest_feed_timestamp,omitempty"`

@@ -137,7 +137,7 @@ func (c *Compactor) Compact(ctx context.Context, req Request) (*model.Compaction
 		SourceID: source.ID, StreamID: stream.ID, RegistryID: source.RegistryID,
 		ExpectedKind: stream.ExpectedKind, ArchiveDate: req.Date, Timezone: loc.String(),
 		DayStartUTC: day.UTC(), DayEndUTC: dayEnd.UTC(), FormatVersion: model.ParquetFormatVersion,
-		SchemaVersion: model.ParquetSchemaVersion, Revision: req.Revision,
+		SchemaVersion: schemaVersionForKind(stream.ExpectedKind), Revision: req.Revision,
 		ApplicationVersion: version.Current().Version, ProtobufRevision: version.Current().ProtobufRevision,
 		ConfigFingerprint: c.cfg.Fingerprint(), CreatedAt: created, ScheduledTicks: stats.Scheduled,
 		SkippedTicks: stats.Skipped, CapturedResponses: int64(len(captures)), HTTPFailures: stats.HTTPFailures,
@@ -163,16 +163,37 @@ func (c *Compactor) Compact(ctx context.Context, req Request) (*model.Compaction
 	var dataStaged string
 	if len(captures) == 0 {
 		manifest.DatasetStatus = "no_captured_responses"
+		if stream.ExpectedKind == "trip_update" {
+			// The schema-v2 verifier requires the total on every trip-update
+			// revision, including days with no captured responses.
+			zero := int64(0)
+			manifest.StopTimeUpdateTotal = &zero
+		}
 	} else {
 		dataStaged = filepath.Join(workDir, "data.parquet")
-		entities, err := c.writeParquet(ctx, dataStaged, captures, &manifest)
-		if err != nil {
-			return nil, err
+		var entities int64
+		artifactRows := int64(len(captures))
+		if stream.ExpectedKind == "trip_update" {
+			var stuTotal int64
+			entities, stuTotal, err = c.writeTripUpdateParquet(ctx, dataStaged, captures, &manifest)
+			if err != nil {
+				return nil, err
+			}
+			manifest.StopTimeUpdateTotal = &stuTotal
+			artifactRows = stuTotal
+			if err := c.validateTripUpdateParquet(dataStaged, captures); err != nil {
+				return nil, fmt.Errorf("validate parquet: %w", err)
+			}
+		} else {
+			entities, err = c.writeParquet(ctx, dataStaged, captures, &manifest)
+			if err != nil {
+				return nil, err
+			}
+			if err := validateParquet(dataStaged, captures); err != nil {
+				return nil, fmt.Errorf("validate parquet: %w", err)
+			}
 		}
 		manifest.EntityTotal = entities
-		if err := validateParquet(dataStaged, captures); err != nil {
-			return nil, fmt.Errorf("validate parquet: %w", err)
-		}
 		hash, size, err := hashFile(dataStaged)
 		if err != nil {
 			return nil, fmt.Errorf("hash parquet: %w", err)
@@ -183,7 +204,7 @@ func (c *Compactor) Compact(ctx context.Context, req Request) (*model.Compaction
 			return nil, fmt.Errorf("name content-addressed parquet: %w", err)
 		}
 		dataStaged = contentPath
-		manifest.Files = append(manifest.Files, model.Artifact{RelativePath: name, Part: 0, Bytes: size, SHA256: hash, Rows: int64(len(captures)), Entities: entities})
+		manifest.Files = append(manifest.Files, model.Artifact{RelativePath: name, Part: 0, Bytes: size, SHA256: hash, Rows: artifactRows, Entities: entities})
 	}
 
 	for _, capture := range captures {
@@ -282,43 +303,21 @@ func (c *Compactor) writeParquet(ctx context.Context, path string, captures []mo
 			_ = f.Close()
 		}
 	}()
-	options := []parquet.WriterOption{parquet.MaxRowsPerRowGroup(100_000)}
-	switch c.cfg.Parquet.Compression {
-	case "zstd":
-		options = append(options, parquet.Compression(&zstd.Codec{Concurrency: 1}))
-	case "snappy":
-		options = append(options, parquet.Compression(&snappy.Codec{}))
-	case "uncompressed":
-		options = append(options, parquet.Compression(&uncompressed.Codec{}))
-	default:
-		return 0, fmt.Errorf("unsupported parquet compression %q", c.cfg.Parquet.Compression)
+	options, err := c.parquetWriterOptions()
+	if err != nil {
+		return 0, err
 	}
 	writer := parquet.NewGenericWriter[Row](f, options...)
-	writer.SetKeyValueMetadata("gtfsrt.format_version", fmt.Sprint(model.ParquetFormatVersion))
-	writer.SetKeyValueMetadata("gtfsrt.schema_version", fmt.Sprint(model.ParquetSchemaVersion))
-	writer.SetKeyValueMetadata("gtfsrt.application_version", manifest.ApplicationVersion)
-	writer.SetKeyValueMetadata("gtfsrt.protobuf_revision", manifest.ProtobufRevision)
-	writer.SetKeyValueMetadata("gtfsrt.config_fingerprint", manifest.ConfigFingerprint)
-	writer.SetKeyValueMetadata("gtfsrt.source_id", manifest.SourceID)
-	writer.SetKeyValueMetadata("gtfsrt.stream_id", manifest.StreamID)
-	writer.SetKeyValueMetadata("gtfsrt.archive_date", manifest.ArchiveDate)
-	writer.SetKeyValueMetadata("gtfsrt.timezone", manifest.Timezone)
-	writer.SetKeyValueMetadata("gtfsrt.generated_at", manifest.CreatedAt.Format(time.RFC3339Nano))
-	writer.SetKeyValueMetadata("gtfsrt.license_url", manifest.LicenseURL)
-	writer.SetKeyValueMetadata("gtfsrt.attribution", manifest.Attribution)
+	setManifestKeyValueMetadata(writer, manifest)
 	var groupBytes int64
 	var entityTotal int64
 	for _, capture := range captures {
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
-		body, err := c.raw.Read(capture.RawPath)
+		body, err := readVerifiedCapture(c.raw, capture)
 		if err != nil {
-			return 0, fmt.Errorf("read capture %s: %w", capture.ID, err)
-		}
-		h := sha256.Sum256(body)
-		if hex.EncodeToString(h[:]) != capture.BodySHA256 {
-			return 0, fmt.Errorf("capture %s hash mismatch", capture.ID)
+			return 0, err
 		}
 		meta := gtfsrt.Decode(body, capture.ExpectedKind, capture.CompletedAt)
 		row := Row{
@@ -373,6 +372,204 @@ func (c *Compactor) writeParquet(ctx context.Context, path string, captures []mo
 	}
 	closeFile = false
 	return entityTotal, nil
+}
+
+// parquetWriterOptions builds the shared writer options.
+func (c *Compactor) parquetWriterOptions() ([]parquet.WriterOption, error) {
+	options := []parquet.WriterOption{parquet.MaxRowsPerRowGroup(100_000)}
+	switch c.cfg.Parquet.Compression {
+	case "zstd":
+		options = append(options, parquet.Compression(&zstd.Codec{Concurrency: 1}))
+	case "snappy":
+		options = append(options, parquet.Compression(&snappy.Codec{}))
+	case "uncompressed":
+		options = append(options, parquet.Compression(&uncompressed.Codec{}))
+	default:
+		return nil, fmt.Errorf("unsupported parquet compression %q", c.cfg.Parquet.Compression)
+	}
+	return options, nil
+}
+
+// setManifestKeyValueMetadata stamps the manifest-derived key/value metadata
+// onto a parquet writer. Generic so both writers reuse it.
+func setManifestKeyValueMetadata[T any](w *parquet.GenericWriter[T], manifest *model.Manifest) {
+	w.SetKeyValueMetadata("gtfsrt.format_version", fmt.Sprint(model.ParquetFormatVersion))
+	w.SetKeyValueMetadata("gtfsrt.schema_version", fmt.Sprint(manifest.SchemaVersion))
+	w.SetKeyValueMetadata("gtfsrt.application_version", manifest.ApplicationVersion)
+	w.SetKeyValueMetadata("gtfsrt.protobuf_revision", manifest.ProtobufRevision)
+	w.SetKeyValueMetadata("gtfsrt.config_fingerprint", manifest.ConfigFingerprint)
+	w.SetKeyValueMetadata("gtfsrt.source_id", manifest.SourceID)
+	w.SetKeyValueMetadata("gtfsrt.stream_id", manifest.StreamID)
+	w.SetKeyValueMetadata("gtfsrt.archive_date", manifest.ArchiveDate)
+	w.SetKeyValueMetadata("gtfsrt.timezone", manifest.Timezone)
+	w.SetKeyValueMetadata("gtfsrt.generated_at", manifest.CreatedAt.Format(time.RFC3339Nano))
+	w.SetKeyValueMetadata("gtfsrt.license_url", manifest.LicenseURL)
+	w.SetKeyValueMetadata("gtfsrt.attribution", manifest.Attribution)
+}
+
+// readVerifiedCapture reads a capture body from the raw store and re-checks its
+// recorded SHA-256 (SPEC §12.2).
+func readVerifiedCapture(raw *rawstore.Store, capture model.Capture) ([]byte, error) {
+	body, err := raw.Read(capture.RawPath)
+	if err != nil {
+		return nil, fmt.Errorf("read capture %s: %w", capture.ID, err)
+	}
+	h := sha256.Sum256(body)
+	if hex.EncodeToString(h[:]) != capture.BodySHA256 {
+		return nil, fmt.Errorf("capture %s hash mismatch", capture.ID)
+	}
+	return body, nil
+}
+
+// tripUpdateRowGroupRows bounds flattened trip-update row groups by row count
+// rather than decoded bytes, since one 7 MB capture can hold 100k+
+// stop_time_update rows. Test-overridable.
+var tripUpdateRowGroupRows = 100_000
+
+func tripUpdateProvenanceFromCapture(capture model.Capture) projection.TripUpdateProvenance {
+	return projection.TripUpdateProvenance{
+		SourceFile:      capture.RawPath,
+		FeedURL:         capture.SanitizedURL,
+		FetchTimestamp:  capture.CompletedAt,
+		SourceID:        capture.SourceID,
+		StreamID:        capture.StreamID,
+		CaptureID:       capture.ID,
+		ArchiveDate:     capture.ArchiveDate,
+		ArchiveTimezone: capture.Timezone,
+		ScheduledAt:     capture.ScheduledAt,
+		ParseStatus:     capture.ParseStatus,
+		ValidationFlags: capture.ValidationFlags,
+	}
+}
+
+func (c *Compactor) writeTripUpdateParquet(ctx context.Context, path string, captures []model.Capture, manifest *model.Manifest) (entityTotal, stopTimeUpdateTotal int64, err error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640)
+	if err != nil {
+		return 0, 0, fmt.Errorf("create parquet: %w", err)
+	}
+	closeFile := true
+	defer func() {
+		if closeFile {
+			_ = f.Close()
+		}
+	}()
+	options, err := c.parquetWriterOptions()
+	if err != nil {
+		return 0, 0, err
+	}
+	// Bind the writer's own row-group limit to the row-count var too: the
+	// explicit Flush below only fires between captures, so without this a
+	// single capture larger than tripUpdateRowGroupRows would land in one
+	// row group instead of splitting at the row-count bound.
+	options = append(options, parquet.MaxRowsPerRowGroup(int64(tripUpdateRowGroupRows)))
+	writer := parquet.NewGenericWriter[projection.TripUpdateStopRow](f, options...)
+	setManifestKeyValueMetadata(writer, manifest)
+	var rowsInGroup int
+	for _, capture := range captures {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, err
+		}
+		body, err := readVerifiedCapture(c.raw, capture)
+		if err != nil {
+			return 0, 0, err
+		}
+		meta := gtfsrt.Decode(body, capture.ExpectedKind, capture.CompletedAt)
+		if capture.EntityCount != nil {
+			entityTotal += int64(*capture.EntityCount)
+		}
+		if meta.Message == nil {
+			continue // undecodable captures keep raw-store + manifest accounting only
+		}
+		rows := projection.ProjectTripUpdateStops(meta.Message, tripUpdateProvenanceFromCapture(capture))
+		stopTimeUpdateTotal += projection.CountStopTimeUpdates(meta.Message)
+		if len(rows) == 0 {
+			continue
+		}
+		if _, err := writer.Write(rows); err != nil {
+			return 0, 0, fmt.Errorf("write parquet rows for %s: %w", capture.ID, err)
+		}
+		rowsInGroup += len(rows)
+		if rowsInGroup >= tripUpdateRowGroupRows {
+			if err := writer.Flush(); err != nil {
+				return 0, 0, fmt.Errorf("flush parquet row group: %w", err)
+			}
+			rowsInGroup = 0
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return 0, 0, fmt.Errorf("close parquet writer: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		return 0, 0, fmt.Errorf("sync parquet: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return 0, 0, fmt.Errorf("close parquet file: %w", err)
+	}
+	closeFile = false
+	return entityTotal, stopTimeUpdateTotal, nil
+}
+
+func (c *Compactor) validateTripUpdateParquet(path string, captures []model.Capture) error {
+	// Phase A: recompute per-capture expectations from the re-decoded raw
+	// inputs. Only counts are kept — memory is bounded by capture count/day.
+	type expectation struct{ rows int64 }
+	expected := make([]expectation, len(captures))
+	var totalRows, totalStu int64
+	for i, capture := range captures {
+		body, err := readVerifiedCapture(c.raw, capture)
+		if err != nil {
+			return fmt.Errorf("validate parquet: %w", err)
+		}
+		meta := gtfsrt.Decode(body, capture.ExpectedKind, capture.CompletedAt)
+		if meta.Message == nil {
+			continue
+		}
+		expected[i].rows = projection.CountProjectedTripUpdateRows(meta.Message)
+		totalStu += projection.CountStopTimeUpdates(meta.Message)
+		totalRows += expected[i].rows
+	}
+	_ = totalStu // stu total is accounted by the write path; row check covers it
+
+	// Phase B: stream parquet rows, asserting capture grouping order and
+	// per-capture counts.
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	reader := parquet.NewGenericReader[projection.TripUpdateStopRow](f)
+	defer reader.Close()
+	buf := make([]projection.TripUpdateStopRow, 1024)
+	captureIdx, rowsLeftInCapture, seen := 0, int64(0), int64(0)
+	for {
+		n, readErr := reader.Read(buf)
+		for i := 0; i < n; i++ {
+			for rowsLeftInCapture == 0 {
+				if captureIdx >= len(expected) {
+					return errors.New("parquet contains extra rows")
+				}
+				rowsLeftInCapture = expected[captureIdx].rows
+				captureIdx++
+			}
+			row := buf[i]
+			capture := captures[captureIdx-1]
+			if row.CaptureID != capture.ID {
+				return fmt.Errorf("row %d provenance mismatch: capture %s rows carry capture %s", seen, capture.ID, row.CaptureID)
+			}
+			rowsLeftInCapture--
+			seen++
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+	if seen != totalRows {
+		return fmt.Errorf("parquet row count %d does not match %d expected from inputs", seen, totalRows)
+	}
+	return nil
 }
 
 func validateParquet(path string, expected []model.Capture) error {
@@ -434,6 +631,23 @@ func validateParquet(path string, expected []model.Capture) error {
 	return nil
 }
 
+// expectedArtifactRows derives the row count the revision's single parquet
+// artifact must contain, by schema version. Nested revisions hold one row per
+// captured response; flattened trip-update revisions hold one row per
+// stop_time_update (plus zero-STU base rows, which are not counted here).
+func expectedArtifactRows(manifest model.Manifest) (int64, error) {
+	if manifest.SchemaVersion == model.ParquetSchemaVersionTripUpdatesFlattened {
+		if manifest.ExpectedKind != "trip_update" {
+			return 0, fmt.Errorf("schema version %d is only valid for trip_update streams, got %q", model.ParquetSchemaVersionTripUpdatesFlattened, manifest.ExpectedKind)
+		}
+		if manifest.StopTimeUpdateTotal == nil {
+			return 0, fmt.Errorf("flattened trip_update manifest lacks stop_time_update_total")
+		}
+		return *manifest.StopTimeUpdateTotal, nil
+	}
+	return manifest.CapturedResponses, nil
+}
+
 func VerifyDirectory(root string, compaction *model.Compaction) error {
 	manifestPath, err := safeRootPath(root, compaction.ManifestPath)
 	if err != nil {
@@ -447,8 +661,11 @@ func VerifyDirectory(root string, compaction *model.Compaction) error {
 	if err := json.Unmarshal(b, &manifest); err != nil {
 		return fmt.Errorf("decode manifest: %w", err)
 	}
-	if manifest.ManifestVersion != model.ManifestFormatVersion || manifest.FormatVersion != model.ParquetFormatVersion || manifest.SchemaVersion != model.ParquetSchemaVersion {
-		return errors.New("manifest uses an unsupported format or schema version")
+	if manifest.ManifestVersion != model.ManifestFormatVersion || manifest.FormatVersion != model.ParquetFormatVersion {
+		return errors.New("manifest uses an unsupported format version")
+	}
+	if !model.IsSupportedParquetSchemaVersion(manifest.SchemaVersion) {
+		return errors.New("manifest uses an unsupported schema version")
 	}
 	if manifest.SourceID != compaction.SourceID || manifest.StreamID != compaction.StreamID || manifest.ArchiveDate != compaction.ArchiveDate || manifest.Revision != compaction.Revision {
 		return errors.New("manifest identity does not match state")
@@ -487,6 +704,10 @@ func VerifyDirectory(root string, compaction *model.Compaction) error {
 			return errors.New("manifest destination snapshot is inconsistent")
 		}
 	}
+	expectedRows, err := expectedArtifactRows(manifest)
+	if err != nil {
+		return err
+	}
 	for _, artifact := range manifest.Files {
 		if filepath.Base(artifact.RelativePath) != artifact.RelativePath {
 			return errors.New("manifest artifact path is not a basename")
@@ -506,7 +727,7 @@ func VerifyDirectory(root string, compaction *model.Compaction) error {
 		if hash != artifact.SHA256 || size != artifact.Bytes {
 			return fmt.Errorf("artifact %s integrity mismatch", artifact.RelativePath)
 		}
-		if artifact.RelativePath != "data-"+artifact.SHA256+".parquet" || artifact.Rows != manifest.CapturedResponses || artifact.Entities != manifest.EntityTotal {
+		if artifact.RelativePath != "data-"+artifact.SHA256+".parquet" || artifact.Rows != expectedRows || artifact.Entities != manifest.EntityTotal {
 			return fmt.Errorf("artifact %s metadata mismatch", artifact.RelativePath)
 		}
 		if compaction.DataPath != filepath.ToSlash(filepath.Join(compaction.Directory, artifact.RelativePath)) || compaction.DataSHA256 != artifact.SHA256 || compaction.DataBytes != artifact.Bytes {
@@ -527,6 +748,16 @@ func safeRootPath(root, relative string) (string, error) {
 		return "", errors.New("artifact path escapes storage root")
 	}
 	return artifactPath, nil
+}
+
+// schemaVersionForKind selects the parquet row-layout version a revision of
+// the given stream kind is written in: trip_update streams flatten to one row
+// per stop_time_update; every other kind stays nested.
+func schemaVersionForKind(expectedKind string) int {
+	if expectedKind == "trip_update" {
+		return model.ParquetSchemaVersionTripUpdatesFlattened
+	}
+	return model.ParquetSchemaVersionNested
 }
 
 func requiredDestinationIDs(destinations []config.Destination) []string {

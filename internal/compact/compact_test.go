@@ -192,3 +192,72 @@ func addCaptureWithTransport(t *testing.T, ctx context.Context, raw *rawstore.St
 		t.Fatal(err)
 	}
 }
+
+func TestManifestSanitizedURL(t *testing.T) {
+	stream := &config.Stream{URL: "https://example.test/feed?apikey=removed"}
+
+	// No captures (no_captured_responses dataset): value comes from the
+	// stream's configured URL, sanitized.
+	got, err := manifestSanitizedURL(nil, stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://example.test/feed" {
+		t.Fatalf("config fallback = %q", got)
+	}
+
+	// With captures: value comes from the (constant) capture metadata.
+	got, err = manifestSanitizedURL([]model.Capture{
+		{SanitizedURL: "https://example.test/feed"},
+		{SanitizedURL: "https://example.test/feed"},
+	}, stream)
+	if err != nil || got != "https://example.test/feed" {
+		t.Fatalf("capture-derived = %q, err = %v", got, err)
+	}
+
+	// Disagreeing captures are an integrity failure, never a silent pick.
+	if _, err := manifestSanitizedURL([]model.Capture{
+		{SanitizedURL: "https://a.test/x"},
+		{SanitizedURL: "https://b.test/y"},
+	}, stream); err == nil {
+		t.Fatal("expected error for disagreeing sanitized URLs")
+	}
+}
+
+func TestManifestFileCarriesSanitizedURL(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Storage.Root = root
+	cfg.Storage.StateDB = filepath.Join(root, "state.sqlite")
+	cfg.Sources = []config.Source{{ID: "demo", Timezone: "UTC", Location: time.UTC, Streams: []config.Stream{{
+		ID: "feed", ExpectedKind: "mixed", URL: "https://example.test/feed?apikey=removed", Interval: config.Duration{Duration: 30 * time.Second},
+	}}}}
+	raw, err := rawstore.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := state.Open(ctx, cfg.Storage.StateDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	result, err := New(&cfg, raw, db).Compact(ctx, Request{SourceID: "demo", StreamID: "feed", Date: "2026-08-12"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(result.ManifestPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest model.Manifest
+	if err := json.Unmarshal(b, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.DatasetStatus != "no_captured_responses" {
+		t.Fatalf("status = %q", manifest.DatasetStatus)
+	}
+	if manifest.SanitizedURL != "https://example.test/feed" {
+		t.Fatalf("manifest sanitized_url = %q", manifest.SanitizedURL)
+	}
+}

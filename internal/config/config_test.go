@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -165,6 +166,46 @@ sources: []
 `)
 	if _, err := Load(duplicate); err == nil {
 		t.Fatal("duplicate YAML key was accepted")
+	}
+}
+
+func TestSanitizedStreamURL(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"https://gtfsapi.translink.ca/v3/gtfsrealtime?apikey=SECRET", "https://gtfsapi.translink.ca/v3/gtfsrealtime"},
+		{"https://user:pass@example.test:8443/feed#frag", "https://example.test:8443/feed"},
+		{"http://feeds.example.test/rt", "http://feeds.example.test/rt"},
+		{"https://example.test/feed?x=1&y=2", "https://example.test/feed"},
+	}
+	for _, tc := range cases {
+		got, err := SanitizedStreamURL(tc.in)
+		if err != nil {
+			t.Fatalf("SanitizedStreamURL(%q): %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Errorf("SanitizedStreamURL(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if _, err := SanitizedStreamURL("no-scheme-or-host"); err == nil {
+		t.Error("expected error for URL without scheme/host")
+	}
+}
+
+// Drift guard: the helper must equal the historical fetch-side rule, so the
+// publication partition key and the stored capture sanitized_url never diverge.
+func TestSanitizedStreamURLMatchesHistoricalRule(t *testing.T) {
+	in := "https://example.test/a/b?x=1"
+	viaHelper, err := SanitizedStreamURL(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historical := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
+	want := historical.String()
+	if viaHelper != want {
+		t.Fatalf("helper = %q, historical rule = %q", viaHelper, want)
 	}
 }
 

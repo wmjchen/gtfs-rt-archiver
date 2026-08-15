@@ -290,7 +290,7 @@ func errorCategory(err error) string {
 		return ""
 	}
 	v := strings.ToLower(err.Error())
-	for _, category := range []string{"local_integrity", "remote_integrity", "authentication", "permission", "remote_not_found", "configuration", "timeout", "throttled", "network"} {
+	for _, category := range []string{"stream_not_configured", "dataset_invalid", "local_integrity", "remote_integrity", "authentication", "permission", "remote_not_found", "configuration", "timeout", "throttled", "network"} {
 		if strings.Contains(v, category) {
 			return category
 		}
@@ -302,7 +302,7 @@ func isPermanent(category string) bool {
 	// Credential, permission, remote, and configuration failures can all be
 	// repaired outside the process, so keep retrying them. Integrity failures
 	// require explicit operator investigation to avoid overwriting evidence.
-	return category == "local_integrity" || category == "remote_integrity"
+	return category == "local_integrity" || category == "remote_integrity" || category == "dataset_invalid"
 }
 
 func classifyError(err error, stderr string) string {

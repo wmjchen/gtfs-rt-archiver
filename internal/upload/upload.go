@@ -119,11 +119,13 @@ func (u *Uploader) ProcessPending(ctx context.Context, destination string) (int,
 			return processed, err
 		}
 		started := time.Now()
-		remoteDir := remoteJoin(dest.Remote, compaction.Directory)
-		if err := u.state.MarkUploadAttempt(ctx, item.ID, "uploading", "", remoteDir, time.Now()); err != nil {
-			return processed, err
+		manifest, remoteDir, err := u.prepareRemoteDir(compaction, dest)
+		if err == nil {
+			if err = u.state.MarkUploadAttempt(ctx, item.ID, "uploading", "", remoteDir, time.Now()); err != nil {
+				return processed, err
+			}
+			err = u.publish(ctx, *dest, compaction, manifest, remoteDir)
 		}
-		err = u.publish(ctx, *dest, compaction, remoteDir)
 		if err == nil {
 			if err := u.state.MarkUploadVerified(ctx, item.ID, remoteDir); err != nil {
 				return processed, err
@@ -152,17 +154,34 @@ func (u *Uploader) ProcessPending(ctx context.Context, destination string) (int,
 	return processed, nil
 }
 
-func (u *Uploader) publish(ctx context.Context, dest config.Destination, compaction *model.Compaction, remoteDir string) error {
+// prepareRemoteDir reads the dataset manifest once and derives the hive
+// publication directory. Manifest read failures are local integrity events;
+// mapping failures carry their own categories (dataset_invalid /
+// stream_not_configured).
+func (u *Uploader) prepareRemoteDir(compaction *model.Compaction, dest *config.Destination) (*model.Manifest, string, error) {
+	manifestAbs := filepath.Join(u.cfg.Storage.Root, filepath.FromSlash(compaction.ManifestPath))
+	b, err := os.ReadFile(manifestAbs)
+	if err != nil {
+		return nil, "", fmt.Errorf("local_integrity: %w", err)
+	}
+	var manifest model.Manifest
+	if err := json.Unmarshal(b, &manifest); err != nil {
+		return nil, "", fmt.Errorf("local_integrity: %w", err)
+	}
+	remoteDir, err := hiveDir(dest.Remote, &manifest, u.cfg)
+	if err != nil {
+		return nil, "", err
+	}
+	return &manifest, remoteDir, nil
+}
+
+func (u *Uploader) publish(ctx context.Context, dest config.Destination, compaction *model.Compaction, manifest *model.Manifest, remoteDir string) error {
 	if err := compact.VerifyDirectory(u.cfg.Storage.Root, compaction); err != nil {
 		return fmt.Errorf("local_integrity: %w", err)
 	}
 	manifestAbs := filepath.Join(u.cfg.Storage.Root, filepath.FromSlash(compaction.ManifestPath))
 	b, err := os.ReadFile(manifestAbs)
 	if err != nil {
-		return fmt.Errorf("local_integrity: %w", err)
-	}
-	var manifest model.Manifest
-	if err := json.Unmarshal(b, &manifest); err != nil {
 		return fmt.Errorf("local_integrity: %w", err)
 	}
 	for _, artifact := range manifest.Files {

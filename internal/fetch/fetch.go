@@ -235,15 +235,17 @@ func (f *Fetcher) captureResponse(ctx context.Context, source config.Source, str
 	if err != nil {
 		return nil, err
 	}
-	u := resp.Request.URL
-	sanitized := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
+	sanitized, err := config.SanitizedStreamURL(resp.Request.URL.String())
+	if err != nil {
+		return nil, err
+	}
 	info := version.Current()
 	capture := &model.Capture{
 		FormatVersion: model.SidecarFormatVersion, ID: id, TickID: tick.ID,
 		SourceID: source.ID, StreamID: stream.ID, ExpectedKind: stream.ExpectedKind,
 		ScheduledAt: tick.ScheduledAt, StartedAt: started.UTC(), CompletedAt: completed,
 		ArchiveDate: tick.ScheduledAt.In(loc).Format(time.DateOnly), Timezone: loc.String(),
-		SanitizedURL: sanitized.String(), HTTPStatus: resp.StatusCode,
+		SanitizedURL: sanitized, HTTPStatus: resp.StatusCode,
 		ResponseHeaders: safeHeaders(resp.Header), DurationMS: duration.Milliseconds(),
 		AttemptCount: attempt, AdvertisedLength: resp.ContentLength, EncodedLength: counted.n,
 		ContentEncoding: encoding, TransportComplete: transportComplete,

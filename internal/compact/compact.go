@@ -152,6 +152,11 @@ func (c *Compactor) Compact(ctx context.Context, req Request) (*model.Compaction
 	}
 	manifest.RequiredDestinations = requiredDestinationIDs(c.cfg.Destinations)
 	manifest.Destinations = manifestDestinations(c.cfg.Destinations)
+	sanitizedURL, err := manifestSanitizedURL(captures, stream)
+	if err != nil {
+		return nil, err
+	}
+	manifest.SanitizedURL = sanitizedURL
 	if source.AttributionTextFile != "" {
 		b, err := os.ReadFile(source.AttributionTextFile)
 		if err != nil {
@@ -819,4 +824,20 @@ func syncDir(path string) error {
 	}
 	defer f.Close()
 	return f.Sync()
+}
+
+// manifestSanitizedURL pins the feed's sanitized URL into the manifest so the
+// publication partition identity survives later config URL edits. Captures of
+// one stream/day always agree; a disagreement is an integrity failure.
+func manifestSanitizedURL(captures []model.Capture, stream *config.Stream) (string, error) {
+	if len(captures) == 0 {
+		return config.SanitizedStreamURL(stream.URL)
+	}
+	value := captures[0].SanitizedURL
+	for _, capture := range captures[1:] {
+		if capture.SanitizedURL != value {
+			return "", fmt.Errorf("captures disagree on sanitized URL: %q vs %q", value, capture.SanitizedURL)
+		}
+	}
+	return value, nil
 }

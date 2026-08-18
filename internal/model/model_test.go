@@ -35,3 +35,18 @@ func TestManifestStopTimeUpdateTotalIsAdditive(t *testing.T) {
 		t.Fatalf("field must serialize when set: %s", b)
 	}
 }
+
+func TestManifestSanitizedURLRoundTrips(t *testing.T) {
+	m := Manifest{SanitizedURL: "https://example.test/feed"}
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Manifest
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.SanitizedURL != m.SanitizedURL {
+		t.Fatalf("round trip: %q != %q", back.SanitizedURL, m.SanitizedURL)
+	}
+}

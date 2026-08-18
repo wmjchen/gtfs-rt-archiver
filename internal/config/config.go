@@ -26,6 +26,22 @@ var idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
 
 func ValidID(value string) bool { return idPattern.MatchString(value) }
 
+// SanitizedStreamURL is the single URL-sanitization rule of the archive: it
+// returns scheme, host, and path with userinfo, query, and fragment removed.
+// Capture metadata, the Parquet feed_url column, and the publication
+// base64url partition key all derive from this function.
+func SanitizedStreamURL(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("parse stream URL: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("stream URL %q lacks scheme or host", rawURL)
+	}
+	sanitized := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
+	return sanitized.String(), nil
+}
+
 type Duration struct{ time.Duration }
 
 func (d *Duration) UnmarshalYAML(node *yaml.Node) error {

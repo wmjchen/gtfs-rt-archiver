@@ -109,6 +109,7 @@ type Manifest struct {
 	ExpectedKind          string           `json:"expected_kind"`
 	ArchiveDate           string           `json:"archive_date"`
 	Timezone              string           `json:"timezone"`
+	SanitizedURL          string           `json:"sanitized_url"`
 	DayStartUTC           time.Time        `json:"day_start_utc"`
 	DayEndUTC             time.Time        `json:"day_end_utc"`
 	FormatVersion         int              `json:"format_version"`
